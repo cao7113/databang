@@ -1,0 +1,178 @@
+#!/usr/bin/env ruby
+require 'bundler/inline'
+
+gemfile do
+  source 'https://rubygems.org'
+  gem 'byebug'
+  gem 'thor'
+end
+
+class CrawlerCLI < Thor
+  class_option :debug, type: :boolean, default: false, aliases: [:d]
+  class_option :dry, type: :boolean, default: false
+  class_option :idnum, type: :boolean, default: false
+
+  desc 'get', 'download data'
+  option :save, type: :boolean, default: false, aliases: [:s], banner: 'save to local data dir'
+  def get(size = 3)
+    data = read_remote_data(size)
+    if options[:save]
+      save_to = data_home.join "#{script_name}-#{size}-#{Time.now.strftime("%Y%m%d%H%M%S")}.json"
+      File.write(save_to, data)
+      puts "saved data into #{save_to}"
+    else
+      puts data
+    end
+  end
+
+  desc 'try', 'export sample data'
+  def try(size = 3, file = data_home.join("#{script_name}-full.json"), full_size = 6019)
+    if file.exist?
+      data = file.read
+    else
+      data = read_remote_data(full_size)
+      file.write data
+    end
+    require 'json'
+    hash = JSON.parse(data)
+    rows = hash['rows']
+
+    rows = rows.sample(size).map do |row|
+      person_info(row)
+    end
+    headers = rows.first.keys 
+
+    result = [headers]
+    rows.each do |r|
+      result << r.values
+    end
+    print_table result
+  end
+
+  desc 'csv', 'export data to csv'
+  def csv(file = data_home.join("#{script_name}-full.json"), full_size = 6019)
+    if file.exist?
+      data = file.read
+    else
+      data = read_remote_data(full_size)
+      file.write data
+    end
+    require 'json'
+    hash = JSON.parse(data)
+    rows = hash['rows']
+
+    rows = rows.map do |row|
+      person_info(row)
+    end
+
+    headers = rows.first.keys 
+
+    # export to a csv
+    require 'csv'
+    csv_str = CSV.generate do |csv|
+      csv << headers
+      rows.each_with_index do |r, idx|
+        puts "==handle #{idx} #{r}"
+        csv << r.values
+      end
+    end
+    csvfile = data_home.join("#{script_name}-full#{'-idnum' if options[:idnum]}.csv")
+    csvfile.write(csv_str)
+    puts "==write to #{csvfile}"
+  end
+
+  desc 'meta', 'show metadata format info'
+  def meta(file = demo_data_file)
+    if file.exist?
+      data = file.read
+    else
+      data = read_remote_data(1)
+      file.write data
+    end
+    require 'json'
+    hash = JSON.parse(data)
+    hash['rows'] = hash['rows'][0]
+    pp hash
+  end
+
+  desc 'list', 'ls data files'
+  def list
+    system "ls -lh #{data_home}"
+  end
+  map 'ls' => 'list'
+
+  no_commands do
+    def data_home
+      Pathname(__dir__).join('data')
+    end
+
+    def data_script
+      Pathname(__FILE__)
+    end
+
+    def script_name
+      data_script.basename('.rb')
+    end
+
+    def demo_data_file
+      data_home.join("#{script_name}-demo.json")
+    end
+
+    def person_info(row)
+      h = row.slice(*%w(name unit score))
+      # get info from id info
+      #https://zhidao.baidu.com/question/18628715.html
+      idcard = row['idCard'] 
+      if idcard.size == 18
+        require 'date'
+        h['birthday'] = Date.parse(idcard[6..13])
+      else
+        h['birthday'] = nil
+      end
+      if options[:idnum]
+        h['idNum'] = try_idnum(row)
+      else
+        h['idCard'] = row['idCard'] 
+      end
+      h
+    end
+
+    def try_idnum(row)
+      require 'digest'
+      #"idCard"=>"32092219721222****",
+      #"idCardSHA"=>
+      #"9ef70bde894959a4e4a1d1b2b9592b470294f9e4012a8cf480319665d1a7c1c6"
+      idn = row['idCard'].gsub('*', '')
+      sha = row['idCardSHA']
+      0.upto(10000) do |num|
+        suf = "%04d" % num
+        ids = "#{idn}#{suf}"
+        return ids if sha == Digest::SHA256.hexdigest(ids)
+      end
+    end
+
+    def read_remote_data(size = 3)
+      url = "http://www.bjrbj.gov.cn/integralpublic/settlePerson/settlePersonJson?sort=pxid&order=asc&limit=10&offset=0&name=&rows=#{size}&page=0&_=#{(Time.now.to_f * 1000).to_i}"
+      puts "get data from url: #{url}"
+
+      require 'open-uri'
+      data  = open(url) do |f| 
+        #p f.content_type     # "text/html"
+        #p f.charset          # "gbk"
+        #p f.content_encoding # []
+        f.read
+      end
+      # fix 'gbk', convert to ruby standard utf8
+      # "\xFE\x9F" from GBK to UTF-8 (Encoding::UndefinedConversionError)
+      data.encode!('utf-8', undef: :replace)
+    end
+  end
+end
+
+CrawlerCLI.start
+
+__END__
+
+in shell
+
+for i in `seq -w 0 9999`; do if \[\[ "$(echo -n "61010319770302$i" | sha256sum | cut -f1 -d' ')" = d00ebe5cd73f1ecf80c2e9d1af26de6cb026eca57b746f77d2728f576e1088c5 ]]; then echo "$i"; fi; done
