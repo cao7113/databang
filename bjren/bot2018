@@ -5,7 +5,11 @@ gemfile do
   source 'https://rubygems.org'
   gem 'byebug'
   gem 'thor'
+
+  gem 'sequel'
+  gem 'pg'
 end
+require 'digest'
 
 class CrawlerCLI < Thor
   class_option :debug, type: :boolean, default: false, aliases: [:d]
@@ -25,20 +29,13 @@ class CrawlerCLI < Thor
     end
   end
 
-  desc 'try', 'export sample data'
-  def try(size = 3, file = data_home.join("#{script_name}-full.json"), full_size = 6019)
-    if file.exist?
-      data = file.read
-    else
-      data = read_remote_data(full_size)
-      file.write data
-    end
-    require 'json'
-    hash = JSON.parse(data)
+  desc 'try', 'explore sample data'
+  def try(size = 3, file = full_json_datafile)
+    hash = load_json_data(file)
     rows = hash['rows']
 
     rows = rows.sample(size).map do |row|
-      person_info(row)
+      norm_person_info(row)
     end
     headers = rows.first.keys 
 
@@ -49,25 +46,17 @@ class CrawlerCLI < Thor
     print_table result
   end
 
-  desc 'csv', 'export data to csv'
-  def csv(file = data_home.join("#{script_name}-full.json"), full_size = 6019)
-    if file.exist?
-      data = file.read
-    else
-      data = read_remote_data(full_size)
-      file.write data
-    end
-    require 'json'
-    hash = JSON.parse(data)
+  desc 'csv', 'export data to csv file'
+  def csv(file = full_json_datafile)
+    hash = load_json_data(file)
     rows = hash['rows']
 
     rows = rows.map do |row|
-      person_info(row)
+      norm_person_info(row)
     end
 
     headers = rows.first.keys 
 
-    # export to a csv
     require 'csv'
     csv_str = CSV.generate do |csv|
       csv << headers
@@ -81,18 +70,45 @@ class CrawlerCLI < Thor
     puts "==write to #{csvfile}"
   end
 
-  desc 'meta', 'show metadata format info'
-  def meta(file = demo_data_file)
-    if file.exist?
-      data = file.read
-    else
-      data = read_remote_data(1)
-      file.write data
+  desc 'dbcli', 'try db query in ruby sequel way'
+  def dbcli(url = 'postgres://postgres:password@localhost:15432/bjren')
+    db = Sequel.connect(url)
+    members = db.from(:members)
+    #blanks = members.where(id_num: nil)
+    byebug
+    puts 
+  end
+
+  desc 'import', 'import into pg'
+  def import(url = 'postgres://postgres:password@localhost:15432/bjren')
+    db = Sequel.connect(url)
+    members = db.from(:members)
+    members.delete
+    puts members.count
+
+    rows = load_json_data['rows']
+    rows.each_with_index do |row, idx|
+      row = norm_person_info(row)
+      puts "==handling #{idx} with #{row}"
+      attrs = row.slice(*%w(name unit birthday score gender))
+      mapping = {
+        id_card: 'idCard',
+        id_card_sha: 'idCardSHA',
+        id_num: 'idNum'
+      }
+      mapping.each do |k, v|
+        attrs[k] = row[v]
+      end
+      attrs[:unit_group] = row['unit']
+      members.insert(attrs)
     end
-    require 'json'
-    hash = JSON.parse(data)
-    hash['rows'] = hash['rows'][0]
-    pp hash
+    puts members.count
+  end
+
+  desc 'meta', 'show metadata format info'
+  def meta
+    file = data_home.join("#{script_name}-demo.json")
+    pp load_json_data(file, 1)
   end
 
   desc 'list', 'ls data files'
@@ -114,12 +130,24 @@ class CrawlerCLI < Thor
       data_script.basename('.rb')
     end
 
-    def demo_data_file
-      data_home.join("#{script_name}-demo.json")
+    def full_json_datafile
+      data_home.join("#{script_name}-full.json")
     end
 
-    def person_info(row)
-      h = row.slice(*%w(name unit score))
+    def load_json_data(file = full_json_datafile, request_size = 6019)
+      file = Pathname(file) unless file.is_a?(Pathname)
+      unless file.exist? 
+        data = read_remote_data(request_size)
+        # cached
+        file.write data
+      end
+      data = file.read 
+      require 'json'
+      JSON.parse(data)
+    end
+
+    def norm_person_info(row)
+      h = row.slice(*%w(name unit score idCard idCardSHA))
       # get info from id info
       #https://zhidao.baidu.com/question/18628715.html
       idcard = row['idCard'] 
@@ -130,25 +158,33 @@ class CrawlerCLI < Thor
         h['birthday'] = nil
       end
       if options[:idnum]
-        h['idNum'] = try_idnum(row)
-      else
-        h['idCard'] = row['idCard'] 
+        #"idCard"=>"32092219721222****",
+        #"idCardSHA"=>
+        #"9ef70bde894959a4e4a1d1b2b9592b470294f9e4012a8cf480319665d1a7c1c6"
+        idmask = row['idCard']
+        idsha = row['idCardSHA']
+        idnum = try_idnum(idmask, idsha)
+        h['idNum'] = idnum
+        if idnum
+          h['gender'] = idnum[-2].to_i.odd? ? 1 : 2
+        end
       end
       h
     end
 
-    def try_idnum(row)
-      require 'digest'
-      #"idCard"=>"32092219721222****",
-      #"idCardSHA"=>
-      #"9ef70bde894959a4e4a1d1b2b9592b470294f9e4012a8cf480319665d1a7c1c6"
-      idn = row['idCard'].gsub('*', '')
-      sha = row['idCardSHA']
-      0.upto(10000) do |num|
-        suf = "%04d" % num
-        ids = "#{idn}#{suf}"
-        return ids if sha == Digest::SHA256.hexdigest(ids)
+    def try_idnum(idmask, idsha)
+      prefix = idmask.gsub('*', '')
+      sha = idsha
+
+      tails = ['X'] + (0..9).to_a
+      0.upto(999) do |num|
+        suf = "%03d" % num
+        tails.each do |t|
+          ids = "#{prefix}#{suf}#{t}"
+          return ids if sha == Digest::SHA256.hexdigest(ids)
+        end
       end
+      nil
     end
 
     def read_remote_data(size = 3)

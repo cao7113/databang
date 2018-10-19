@@ -5,8 +5,8 @@
 http://zhengwu.beijing.gov.cn/zwzt/2018jflhgs/
 
 ```
-# 网页地址
+# web url
 http://www.bjrbj.gov.cn/integralpublic/settleperson/settlePersonTable/
-浏览器控制台中查看xhr 请求json api
+# xhr json api request from web console
 http://www.bjrbj.gov.cn/integralpublic/settlePerson/settlePersonJson?sort=pxid&order=asc&limit=10&offset=0&name=&rows=10&page=0&_=1539760994891
 ```
