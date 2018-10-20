@@ -99,7 +99,6 @@ class CrawlerCLI < Thor
       mapping.each do |k, v|
         attrs[k] = row[v]
       end
-      attrs[:unit_group] = row['unit']
       members.insert(attrs)
     end
     puts members.count
@@ -166,7 +165,7 @@ class CrawlerCLI < Thor
         idnum = try_idnum(idmask, idsha)
         h['idNum'] = idnum
         if idnum
-          h['gender'] = idnum[-2].to_i.odd? ? 1 : 2
+          h['gender'] = idnum[-2].to_i.odd? ? 'male' : 'female'
         end
       end
       h
